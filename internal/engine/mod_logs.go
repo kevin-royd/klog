@@ -3,7 +3,6 @@ package engine
 import (
 	"container/heap"
 	"context"
-	"sync/atomic"
 	"time"
 
 	icolor "klog/internal/color"
@@ -113,39 +112,10 @@ func (m *LogsModule) watchAdapter(ctx context.Context) {
 	}
 }
 
-// ... 辅助方法保持不变 (attachPod, streamWorker)
 func (m *LogsModule) attachPod(pod *corev1.Pod) {
 	for _, container := range pod.Spec.Containers {
 		m.engine.Spawn(func(ctx context.Context) {
 			m.streamWorker(pod.Namespace, pod.Name, container.Name)
 		})
-	}
-}
-
-func (m *LogsModule) streamWorker(ns, pod, container string) {
-	ls, err := m.engine.Streams().GetOrCreate(ns, pod, container, m.engine.Config())
-	if err != nil {
-		return
-	}
-
-	for ls.Scanner.Scan() {
-		text := ls.Scanner.Text()
-
-		// 尝试解析时间戳 (如果用户开启了 --timestamps)
-		ts := time.Now() // 缺省为本地接收时间
-
-		select {
-		case <-m.ctx.Done():
-			return
-		case m.logChan <- &LogLine{
-			Raw:           text,
-			Namespace:     ls.Namespace,
-			PodName:       ls.PodName,
-			ContainerName: ls.Container,
-			Timestamp:     ts,
-		}:
-		default:
-			atomic.AddInt64(&m.engine.stats.DroppedLines, 1)
-		}
 	}
 }

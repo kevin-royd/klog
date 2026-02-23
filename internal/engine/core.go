@@ -13,12 +13,13 @@ import (
 
 // Stats 引擎自观测指标
 type Stats struct {
-	TotalStreams   int32
-	ActiveStreams  int32
-	Goroutines     int32
-	DroppedLines   int64
-	TotalLines     int64
-	ProcessedLines int64
+	TotalStreams      int32
+	ActiveStreams     int32
+	Goroutines        int32
+	DroppedLines      int64
+	TotalLines        int64
+	ProcessedLines    int64
+	ReconnectAttempts int64
 }
 
 // Engine 系统内核 (Kernel V5 - The Module Orchestrator)
