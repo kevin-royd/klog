@@ -117,19 +117,22 @@ func (e *Engine) Stop() {
 
 	icolor.Warn("Kernel: 执行关停指令...")
 
-	// 1. 停止模组
+	// 1. 停止模组 (业务层)
 	for _, m := range e.modules {
 		_ = m.Stop()
 	}
 
-	// 2. 停止长连接
+	// 2. 停止长连接 (通信层)
 	e.streams.CloseAll()
 
-	// 3. 等待所有派生协程
+	// 3. 停止基础组件 (底座层)
+	e.informer.Stop()
+
+	// 4. 等待所有派生协程归零
 	e.wg.Wait()
 
 	atomic.StoreInt32(&e.state, int32(StateStopped))
-	icolor.Success("Kernel: 系统已完全停止。")
+	icolor.Success("Kernel: 系统已完全停止 (Stats: Dropped=%d)", atomic.LoadInt64(&e.stats.DroppedLines))
 }
 
 // AttachModule 挂载功能模组
