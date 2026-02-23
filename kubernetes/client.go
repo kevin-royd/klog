@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -178,6 +179,24 @@ func matchPod(pod PodInfo, keyword string) bool {
 	}
 
 	return false
+}
+
+// ListPods 实现
+func (c *Client) ListPods(ctx context.Context, ns string, opts metav1.ListOptions) ([]*corev1.Pod, error) {
+	list, err := c.Clientset.CoreV1().Pods(ns).List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	var res []*corev1.Pod
+	for i := range list.Items {
+		res = append(res, &list.Items[i])
+	}
+	return res, nil
+}
+
+// GetPod 实现
+func (c *Client) GetPod(ctx context.Context, ns, name string) (*corev1.Pod, error) {
+	return c.Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 }
 
 // PodInfo Pod信息
