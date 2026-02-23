@@ -14,26 +14,35 @@ var (
 
 var logsCmd = &cobra.Command{
 	Use:   "logs [资源类型/名称]",
-	Short: "高性能 Kubernetes 日志系统",
-	Long:  `klog Engine 驱动：支持资源秒级解析、滚动更新自动追踪、全链路生命周期管理。`,
+	Short: "klog v5 - 高性能模组化日志引擎",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// 1. 从命令中提取 Root Context (由 main 注入)
 		ctx := cmd.Context()
 
-		// 2. 初始化核心引擎 (Engine 驱动系统)
+		// 1. 初始化引擎底座
 		eng, err := engine.New(ctx, logCfg)
 		if err != nil {
 			return fmt.Errorf("引擎初始化失败: %w", err)
 		}
 
-		// 4. 执行业务逻辑
-		return eng.RunLogs(args[0])
+		// 2. 挂载日志模组 (模块化设计)
+		logMod := engine.NewLogsModule(args[0])
+		if err := eng.AttachModule(logMod); err != nil {
+			return err
+		}
+
+		// 3. 启动引擎并阻塞直到退出
+		if err := eng.Start(); err != nil {
+			return err
+		}
+
+		<-ctx.Done()
+		eng.Stop()
+		return nil
 	},
 }
 
 func init() {
-	// 绑定 Flags
 	logCfg.BindFlags(logsCmd)
 	rootCmd.AddCommand(logsCmd)
 }

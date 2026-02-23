@@ -9,11 +9,9 @@ import (
 	icolor "klog/internal/color"
 	"klog/internal/config"
 	"klog/internal/k8s"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
-// Stats 引擎运行统计 (自观测)
+// Stats 引擎自观测指标
 type Stats struct {
 	TotalStreams   int32
 	ActiveStreams  int32
@@ -23,26 +21,29 @@ type Stats struct {
 	ProcessedLines int64
 }
 
-// Engine 系统内核 (Kernel V4)
+// Engine 系统内核 (Kernel V5 - The Module Orchestrator)
 type Engine struct {
-	ctx context.Context
-	cfg *config.Config
+	ctx   context.Context
+	cfg   *config.Config
+	state int32 // 使用 atomic 操作 State
 
+	// 系统底座
 	k8s      k8s.Adapter
 	streams  *StreamManager
 	informer *k8s.PodInformer
-	pipeline *Pipeline
 
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	status int32 // 0: stopped, 1: running
+	// 模组管理
+	modules map[string]Module
 
-	// 指标
+	// 统计与监控
 	stats Stats
+	wg    sync.WaitGroup
+	mu    sync.RWMutex
 }
 
-// New 初始化系统，关联 root context
+// New 初始化上帝容器
 func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
+	// Adapter 应该考虑单例化，此处暂且保持 Engine 持有
 	adapter, err := k8s.NewAdapter(cfg.Kubeconfig, cfg.Namespace)
 	if err != nil {
 		return nil, err
@@ -51,147 +52,85 @@ func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 	e := &Engine{
 		ctx:      ctx,
 		cfg:      cfg,
+		state:    int32(StateInit),
 		k8s:      adapter,
-		streams:  NewStreamManager(ctx, adapter.Clientset(), 200),
+		streams:  NewStreamManager(ctx, adapter.Clientset(), 500),
 		informer: k8s.NewPodInformer(cfg.Kubeconfig, cfg.Namespace),
-		pipeline: NewPipeline(),
+		modules:  make(map[string]Module),
 	}
 
 	return e, nil
 }
 
-// Spawn 统一协程创建入口：实现 Ownership 追踪
-func (e *Engine) Spawn(f func(ctx context.Context)) {
-	atomic.AddInt32(&e.stats.Goroutines, 1)
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
-		defer atomic.AddInt32(&e.stats.Goroutines, -1)
-		f(e.ctx)
-	}()
-}
-
-// RunLogs 启动入口 (支持可重复调用)
-func (e *Engine) RunLogs(resource string) error {
-	e.mu.Lock()
-	if e.status == 1 {
-		e.mu.Unlock()
-		return fmt.Errorf("引擎已在运行中")
+// Start 启动引擎与其下所有模组
+func (e *Engine) Start() error {
+	if !atomic.CompareAndSwapInt32(&e.state, int32(StateInit), int32(StateRunning)) {
+		return fmt.Errorf("引擎无法启动: 当前状态 %v", e.state)
 	}
-	e.status = 1
-	e.mu.Unlock()
 
-	icolor.Header("klog V4 Kernel Ready (Status: %d)", e.status)
+	icolor.Header("klog v5 Kernel Starting...")
 
-	// 后续所有逻辑通过 Spawn 派生
+	// 启动核心基础组件
 	if err := e.informer.Start(e.ctx); err != nil {
 		return err
 	}
 
-	pods, err := e.k8s.ResolvePods(e.ctx, resource)
-	if err != nil {
-		return err
+	// 启动业务模组
+	for _, m := range e.modules {
+		if err := m.Start(); err != nil {
+			return err
+		}
 	}
 
-	for _, p := range pods {
-		e.attachPod(p)
-	}
-
-	if e.cfg.Follow {
-		e.Spawn(func(ctx context.Context) {
-			e.eventLoop(resource)
-		})
-	}
-
-	// 阻塞等待
-	<-e.ctx.Done()
-	e.Stop()
 	return nil
 }
 
-// Stop 绝对关停：状态重置，确保支持 Start/Stop 循环
+// Stop 优雅关停
 func (e *Engine) Stop() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.status == 0 {
+	if !atomic.CompareAndSwapInt32(&e.state, int32(StateRunning), int32(StateStopping)) {
 		return
 	}
 
-	icolor.Warn("Kernel: 执行关停, 当前状态指标: Goroutines=%d, Dropped=%d",
-		atomic.LoadInt32(&e.stats.Goroutines), atomic.LoadInt64(&e.stats.DroppedLines))
+	icolor.Warn("Kernel: 执行关停指令...")
 
+	// 1. 停止模组
+	for _, m := range e.modules {
+		_ = m.Stop()
+	}
+
+	// 2. 停止长连接
 	e.streams.CloseAll()
+
+	// 3. 等待所有派生协程
 	e.wg.Wait()
 
-	e.status = 0
-	icolor.Success("Kernel: 系统已空转，可安全释放或重启。")
+	atomic.StoreInt32(&e.state, int32(StateStopped))
+	icolor.Success("Kernel: 系统已完全停止。")
 }
 
-func (e *Engine) eventLoop(target string) {
-	events := e.informer.Events()
-	for {
-		select {
-		case <-e.ctx.Done():
-			return
-		case event := <-events:
-			if event.Type == "add" && event.Pod.Status.Phase == corev1.PodRunning {
-				icolor.Success("✨ 扩容检测: %s", event.Pod.Name)
-				e.attachPod(event.Pod)
-			}
-		}
+// AttachModule 挂载功能模组
+func (e *Engine) AttachModule(m Module) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := m.Init(e.ctx, e); err != nil {
+		return err
 	}
+	e.modules[m.Name()] = m
+	return nil
 }
 
-func (e *Engine) attachPod(pod *corev1.Pod) {
-	for _, container := range pod.Spec.Containers {
-		e.Spawn(func(ctx context.Context) {
-			e.streamWorker(pod.Namespace, pod.Name, container.Name)
-		})
-	}
+// Spawn 统一协程派生 (具备 WaitGroup 约束)
+func (e *Engine) Spawn(f func(ctx context.Context)) {
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		f(e.ctx)
+	}()
 }
 
-func (e *Engine) streamWorker(ns, pod, container string) {
-	atomic.AddInt32(&e.stats.ActiveStreams, 1)
-	defer atomic.AddInt32(&e.stats.ActiveStreams, -1)
-
-	ls, err := e.streams.GetOrCreate(ns, pod, container, e.cfg)
-	if err != nil {
-		return
-	}
-
-	e.processStream(ls)
-}
-
-func (e *Engine) processStream(ls *LogStream) {
-	scanner := ls.Scanner
-	printer := icolor.NewPrinter()
-
-	for scanner.Scan() {
-		select {
-		case <-e.ctx.Done():
-			return
-		default:
-			line := scanner.Text()
-			atomic.AddInt64(&e.stats.TotalLines, 1)
-
-			logLine := &LogLine{
-				Raw:           line,
-				Namespace:     ls.Namespace,
-				PodName:       ls.PodName,
-				ContainerName: ls.Container,
-			}
-
-			// 此时可以进行 Pipeline 处理
-			processed := e.pipeline.Process(logLine)
-			if processed != nil && !processed.Filtered {
-				atomic.AddInt64(&e.stats.ProcessedLines, 1)
-				printer.PrintLog(ls.Namespace, ls.PodName, ls.Container, processed.Raw)
-			}
-		}
-	}
-}
-
-// GetStats 暴露当前的统计数据
-func (e *Engine) GetStats() Stats {
-	return e.stats
-}
+// Internal Accessors (仅限内部模块调用)
+func (e *Engine) Adapter() k8s.Adapter       { return e.k8s }
+func (e *Engine) Streams() *StreamManager    { return e.streams }
+func (e *Engine) Informer() *k8s.PodInformer { return e.informer }
+func (e *Engine) Config() *config.Config     { return e.cfg }

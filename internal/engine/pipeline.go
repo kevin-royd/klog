@@ -6,17 +6,6 @@ import (
 	"time"
 )
 
-// LogLine 日志行
-type LogLine struct {
-	Raw           string
-	Namespace     string
-	PodName       string
-	ContainerName string
-	Timestamp     time.Time
-	Fields        map[string]string // 解析后的字段
-	Filtered      bool              // 是否被过滤
-}
-
 // Stage 处理阶段接口
 type Stage interface {
 	Process(line *LogLine) *LogLine

@@ -8,14 +8,24 @@ import (
 
 var traceCmd = &cobra.Command{
 	Use:   "trace [resource]",
-	Short: "Trace ID 跨 Pod 关联",
+	Short: "klog v5 - Trace ID 追踪",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		eng, err := engine.New(ctx, logCfg)
 		if err != nil {
 			return err
 		}
-		return eng.RunLogs(args[0]) // 对于简单的日志流，共用一个逻辑出口
+
+		// 挂载日志模组实现基础追踪
+		logMod := engine.NewLogsModule(args[0])
+		_ = eng.AttachModule(logMod)
+
+		if err := eng.Start(); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		eng.Stop()
+		return nil
 	},
 }
 
