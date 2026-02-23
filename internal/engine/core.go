@@ -31,6 +31,7 @@ type Engine struct {
 	k8s      k8s.Adapter
 	streams  *StreamManager
 	informer *k8s.PodInformer
+	bus      *EventBus
 
 	// 模组管理
 	modules map[string]Module
@@ -56,11 +57,34 @@ func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 		k8s:      adapter,
 		streams:  NewStreamManager(ctx, adapter.Clientset(), 500),
 		informer: k8s.NewPodInformer(cfg.Kubeconfig, cfg.Namespace),
+		bus:      NewEventBus(),
 		modules:  make(map[string]Module),
 	}
 
+	// 启动底座后自动开始路由事件
+	e.Spawn(e.eventRouter)
+
 	return e, nil
 }
+
+func (e *Engine) eventRouter(ctx context.Context) {
+	events := e.informer.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-events:
+			// 将 K8s 原始事件包装后发布到系统总线
+			e.bus.Publish("pod_events", Event{
+				Type: ev.Type,
+				Data: ev.Pod,
+			})
+		}
+	}
+}
+
+// Events 暴露消息中心 (供 Module 订阅)
+func (e *Engine) Events() *EventBus { return e.bus }
 
 // Start 启动引擎与其下所有模组
 func (e *Engine) Start() error {
