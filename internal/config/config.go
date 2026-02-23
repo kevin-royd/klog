@@ -33,12 +33,18 @@ type Config struct {
 	// 处理选项
 	Follow  bool
 	Verbose bool
+
+	// 性能调优 (V5.4+)
+	SortWindow    time.Duration
+	StatsInterval time.Duration
 }
 
 // NewDefaultConfig 返回默认配置
 func NewDefaultConfig() *Config {
 	return &Config{
-		Tail: -1,
+		Tail:          -1,
+		SortWindow:    200 * time.Millisecond,
+		StatsInterval: 10 * time.Second,
 	}
 }
 

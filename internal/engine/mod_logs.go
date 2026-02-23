@@ -80,13 +80,17 @@ func (m *LogsModule) sortedRenderer(ctx context.Context) {
 			return
 		case line := <-m.logChan:
 			heap.Push(h, line)
+			// 配置：防止 Heap 无限增长 (溢出保护)
+			if h.Len() > 5000 {
+				line := heap.Pop(h).(*LogLine)
+				printer.PrintLog(line.Namespace, line.PodName, line.ContainerName, line.Raw)
+			}
 		case <-ticker.C:
-			// 点击检查: 如果堆顶的日志已经等待超过 200ms，则认为后续不会有比它更早的日志了
-			// 这种“滑动窗口”平衡了延迟与顺序
 			now := time.Now()
+			window := m.engine.Config().SortWindow
 			for h.Len() > 0 {
 				top := (*h)[0]
-				if now.Sub(top.Timestamp) < 200*time.Millisecond {
+				if now.Sub(top.Timestamp) < window {
 					break
 				}
 				line := heap.Pop(h).(*LogLine)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	icolor "klog/internal/color"
 	"klog/internal/config"
@@ -45,8 +46,13 @@ type Engine struct {
 
 // New 初始化上帝容器
 func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
-	// Adapter 应该考虑单例化，此处暂且保持 Engine 持有
-	adapter, err := k8s.NewAdapter(cfg.Kubeconfig, cfg.Namespace)
+	// 使用全局 Provider 确保 Transport 复用
+	provider, err := k8s.GetProvider(cfg.Kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+
+	adapter, err := k8s.NewAdapter(cfg.Kubeconfig, cfg.Namespace) // 后续可重构为接收 Clientset
 	if err != nil {
 		return nil, err
 	}
@@ -56,16 +62,37 @@ func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 		cfg:      cfg,
 		state:    int32(StateInit),
 		k8s:      adapter,
-		streams:  NewStreamManager(ctx, adapter.Clientset(), 500),
+		streams:  NewStreamManager(ctx, provider.Clientset, 500),
 		informer: k8s.NewPodInformer(cfg.Kubeconfig, cfg.Namespace),
 		bus:      NewEventBus(),
 		modules:  make(map[string]Module),
 	}
 
-	// 启动底座后自动开始路由事件
 	e.Spawn(e.eventRouter)
+	e.Spawn(e.statsMonitor) // 启动自观测控制台
 
 	return e, nil
+}
+
+func (e *Engine) statsMonitor(ctx context.Context) {
+	ticker := time.NewTicker(e.cfg.StatsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			icolor.Header("--- KLOG ENGINE STATS ---")
+			icolor.Info("Active Streams: %d | Goroutines: %d",
+				atomic.LoadInt32(&e.stats.ActiveStreams),
+				atomic.LoadInt32(&e.stats.Goroutines))
+			icolor.Info("Processed: %d | Dropped: %d | Reconnects: %d",
+				atomic.LoadInt64(&e.stats.ProcessedLines),
+				atomic.LoadInt64(&e.stats.DroppedLines),
+				atomic.LoadInt64(&e.stats.ReconnectAttempts))
+		}
+	}
 }
 
 func (e *Engine) eventRouter(ctx context.Context) {
