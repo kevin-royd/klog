@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var (
@@ -184,7 +185,7 @@ func fetchCrashLogs(ctx context.Context, client *kubernetes.Client,
 // fetchPodEvents 获取Pod相关事件
 func fetchPodEvents(ctx context.Context, client *kubernetes.Client, pod kubernetes.PodInfo) {
 	events, err := client.Clientset.CoreV1().Events(pod.Namespace).List(ctx,
-		corev1.ListOptions{
+		metav1.ListOptions{
 			FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Pod", pod.Name),
 		})
 	if err != nil {
