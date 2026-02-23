@@ -5,23 +5,23 @@ import (
 	"fmt"
 	"strings"
 
-	"klog/kubernetes"
+	"klog/internal/k8s"
 )
 
-// resolveNamespaces 解析 namespace 列表 (共享于各命令)
-func resolveNamespaces(ctx context.Context, client *kubernetes.Client) ([]string, error) {
-	if allNamespaces {
-		ns, err := client.GetAllNamespaces(ctx)
+// resolveNamespaces 解析 namespace 列表 (基于 Adapter)
+func resolveNamespaces(ctx context.Context, adapter k8s.Adapter) ([]string, error) {
+	if logCfg.AllNS {
+		ns, err := adapter.GetAllNamespaces(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("获取 namespace 列表失败: %w", err)
 		}
 		return ns, nil
 	}
 
-	return []string{client.Namespace}, nil
+	return []string{adapter.GetNamespace()}, nil
 }
 
-// detectLogLevel 探测日志级别 (共享于各命令)
+// detectLogLevel 探测日志级别
 func detectLogLevel(line string) string {
 	upper := strings.ToUpper(line)
 	switch {

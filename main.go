@@ -1,17 +1,20 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"klog/cmd"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
-// klog - Kubernetes Log Observability CLI
-// 支持作为独立工具使用，也支持作为 kubectl 插件 (kubectl klog)
 func main() {
-	if err := cmd.Execute(); err != nil {
-		// 这里不再需要 os.Exit，因为 cmd.Execute 内部已经处理了错误并返回
-		fmt.Printf("\n❌ 发生错误: %v\n", err)
+	// 建立唯一的 Root Context，它是整个系统的生命周期源头
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 传递到命令层
+	if err := cmd.Execute(ctx); err != nil {
 		os.Exit(1)
 	}
 }

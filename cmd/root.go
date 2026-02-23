@@ -1,8 +1,7 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
+	"context"
 
 	"github.com/spf13/cobra"
 )
@@ -72,11 +71,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&labelSelector, "selector", "l", "", "标签选择器")
 }
 
-// Execute 执行根命令
-func Execute() error {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return err
-	}
-	return nil
+// Execute 执行根命令，注入 root context
+func Execute(ctx context.Context) error {
+	return rootCmd.ExecuteContext(ctx)
 }
