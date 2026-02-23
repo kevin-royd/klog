@@ -15,7 +15,7 @@ var traceCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return eng.ExecuteLogs(args[0]) // 对于简单的日志流，共用一个逻辑出口
+		return eng.RunLogs(args[0]) // 对于简单的日志流，共用一个逻辑出口
 	},
 }
 

@@ -15,7 +15,7 @@ var watchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return eng.ExecuteLogs(args[0])
+		return eng.RunLogs(args[0])
 	},
 }
 

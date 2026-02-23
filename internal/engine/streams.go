@@ -53,7 +53,7 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 		return s, nil
 	}
 
-	// 2. 建立新连接
+	// 2. 建立新连接 (绑定到 Root Context)
 	opts := &corev1.PodLogOptions{
 		Container:  container,
 		Follow:     cfg.Follow,
@@ -64,6 +64,7 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 		opts.TailLines = &cfg.Tail
 	}
 
+	// 这里的 ctx 必须是派生自 root context，以便一键关停
 	streamCtx, cancel := context.WithCancel(m.ctx)
 	req := m.clientset.CoreV1().Pods(ns).GetLogs(pod, opts)
 	rc, err := req.Stream(streamCtx)

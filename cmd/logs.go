@@ -27,8 +27,8 @@ var logsCmd = &cobra.Command{
 			return fmt.Errorf("引擎初始化失败: %w", err)
 		}
 
-		// 3. 将任务交给引擎处理
-		return eng.ExecuteLogs(args[0])
+		// 4. 执行业务逻辑
+		return eng.RunLogs(args[0])
 	},
 }
 
