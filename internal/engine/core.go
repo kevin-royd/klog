@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	icolor "klog/internal/color"
 	"klog/internal/config"
@@ -12,23 +13,35 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Engine 系统内核 (Kernel) - 对外黑盒
+// Stats 引擎运行统计 (自观测)
+type Stats struct {
+	TotalStreams   int32
+	ActiveStreams  int32
+	Goroutines     int32
+	DroppedLines   int64
+	TotalLines     int64
+	ProcessedLines int64
+}
+
+// Engine 系统内核 (Kernel V4)
 type Engine struct {
 	ctx context.Context
 	cfg *config.Config
 
-	// 私有子系统，外部禁止访问
 	k8s      k8s.Adapter
 	streams  *StreamManager
 	informer *k8s.PodInformer
 	pipeline *Pipeline
 
-	wg      sync.WaitGroup // 统领所有后台协程
-	started bool
-	mu      sync.Mutex
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	status int32 // 0: stopped, 1: running
+
+	// 指标
+	stats Stats
 }
 
-// New 创建系统容器
+// New 初始化系统，关联 root context
 func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 	adapter, err := k8s.NewAdapter(cfg.Kubeconfig, cfg.Namespace)
 	if err != nil {
@@ -39,7 +52,7 @@ func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 		ctx:      ctx,
 		cfg:      cfg,
 		k8s:      adapter,
-		streams:  NewStreamManager(ctx, adapter.Clientset(), 200), // 流管家
+		streams:  NewStreamManager(ctx, adapter.Clientset(), 200),
 		informer: k8s.NewPodInformer(cfg.Kubeconfig, cfg.Namespace),
 		pipeline: NewPipeline(),
 	}
@@ -47,100 +60,108 @@ func New(ctx context.Context, cfg *config.Config) (*Engine, error) {
 	return e, nil
 }
 
-// RunLogs 执行日志追踪业务 (唯一入口)
+// Spawn 统一协程创建入口：实现 Ownership 追踪
+func (e *Engine) Spawn(f func(ctx context.Context)) {
+	atomic.AddInt32(&e.stats.Goroutines, 1)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		defer atomic.AddInt32(&e.stats.Goroutines, -1)
+		f(e.ctx)
+	}()
+}
+
+// RunLogs 启动入口 (支持可重复调用)
 func (e *Engine) RunLogs(resource string) error {
 	e.mu.Lock()
-	if e.started {
+	if e.status == 1 {
 		e.mu.Unlock()
 		return fmt.Errorf("引擎已在运行中")
 	}
-	e.started = true
+	e.status = 1
 	e.mu.Unlock()
 
-	// 1. 启动 Informer
+	icolor.Header("klog V4 Kernel Ready (Status: %d)", e.status)
+
+	// 后续所有逻辑通过 Spawn 派生
 	if err := e.informer.Start(e.ctx); err != nil {
 		return err
 	}
 
-	// 2. 初始解析
 	pods, err := e.k8s.ResolvePods(e.ctx, resource)
 	if err != nil {
 		return err
 	}
 
-	// 3. 初始挂载
 	for _, p := range pods {
 		e.attachPod(p)
 	}
 
-	// 4. 解耦事件追踪 (Watcher -> Engine -> Streams)
 	if e.cfg.Follow {
-		e.wg.Add(1)
-		go e.eventLoop(resource)
+		e.Spawn(func(ctx context.Context) {
+			e.eventLoop(resource)
+		})
 	}
 
-	// 5. 等待系统生命周期结束
+	// 阻塞等待
 	<-e.ctx.Done()
 	e.Stop()
 	return nil
 }
 
-// Stop 绝对停止：确保所有子系统资源彻底回收
+// Stop 绝对关停：状态重置，确保支持 Start/Stop 循环
 func (e *Engine) Stop() {
-	icolor.Warn("Kernel: 正在启动关停程序...")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.status == 0 {
+		return
+	}
 
-	// 关闭所有流 (Owner 直接关停)
+	icolor.Warn("Kernel: 执行关停, 当前状态指标: Goroutines=%d, Dropped=%d",
+		atomic.LoadInt32(&e.stats.Goroutines), atomic.LoadInt64(&e.stats.DroppedLines))
+
 	e.streams.CloseAll()
-
-	// 等待所有异步任务退出 (如 eventLoop)
 	e.wg.Wait()
 
-	icolor.Success("Kernel: 关停完成, goroutine 已清零。")
+	e.status = 0
+	icolor.Success("Kernel: 系统已空转，可安全释放或重启。")
 }
 
-// eventLoop 无线循环监听集群变化，实现业务路由
 func (e *Engine) eventLoop(target string) {
-	defer e.wg.Done()
 	events := e.informer.Events()
-
 	for {
 		select {
 		case <-e.ctx.Done():
 			return
 		case event := <-events:
-			// 只有符合条件的“增加”事件才触发流挂载
 			if event.Type == "add" && event.Pod.Status.Phase == corev1.PodRunning {
-				//TODO: 此处后续接入 ResourceMatcher
-				icolor.Success("✨ 检测到新 Pod: %s, 自动挂载日志流...", event.Pod.Name)
+				icolor.Success("✨ 扩容检测: %s", event.Pod.Name)
 				e.attachPod(event.Pod)
 			}
 		}
 	}
 }
 
-// attachPod 内部调度：私有
 func (e *Engine) attachPod(pod *corev1.Pod) {
 	for _, container := range pod.Spec.Containers {
-		e.wg.Add(1)
-		go func(ns, p, c string) {
-			defer e.wg.Done()
-			e.streamWorker(ns, p, c)
-		}(pod.Namespace, pod.Name, container.Name)
+		e.Spawn(func(ctx context.Context) {
+			e.streamWorker(pod.Namespace, pod.Name, container.Name)
+		})
 	}
 }
 
-// streamWorker 专门负责单个流的长效维护
 func (e *Engine) streamWorker(ns, pod, container string) {
+	atomic.AddInt32(&e.stats.ActiveStreams, 1)
+	defer atomic.AddInt32(&e.stats.ActiveStreams, -1)
+
 	ls, err := e.streams.GetOrCreate(ns, pod, container, e.cfg)
 	if err != nil {
 		return
 	}
 
-	// 具体的读取循环交给 Engine 逻辑，但流的所有权在 StreamManager
 	e.processStream(ls)
 }
 
-// processStream 私有处理逻辑
 func (e *Engine) processStream(ls *LogStream) {
 	scanner := ls.Scanner
 	printer := icolor.NewPrinter()
@@ -151,16 +172,26 @@ func (e *Engine) processStream(ls *LogStream) {
 			return
 		default:
 			line := scanner.Text()
+			atomic.AddInt64(&e.stats.TotalLines, 1)
+
 			logLine := &LogLine{
 				Raw:           line,
 				Namespace:     ls.Namespace,
 				PodName:       ls.PodName,
 				ContainerName: ls.Container,
 			}
+
+			// 此时可以进行 Pipeline 处理
 			processed := e.pipeline.Process(logLine)
 			if processed != nil && !processed.Filtered {
+				atomic.AddInt64(&e.stats.ProcessedLines, 1)
 				printer.PrintLog(ls.Namespace, ls.PodName, ls.Container, processed.Raw)
 			}
 		}
 	}
+}
+
+// GetStats 暴露当前的统计数据
+func (e *Engine) GetStats() Stats {
+	return e.stats
 }

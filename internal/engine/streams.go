@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"sync"
+	"time"
 
 	"klog/internal/config"
 
@@ -29,6 +31,7 @@ type LogStream struct {
 	Scanner   *bufio.Scanner
 	Cancel    context.CancelFunc
 	Active    bool
+	Reader    io.ReadCloser
 }
 
 // NewStreamManager 创建流管家
@@ -46,14 +49,13 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 	key := fmt.Sprintf("%s/%s/%s", ns, pod, container)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 1. 防止重复挂载 (Avoid Duplicated Streams)
 	if s, ok := m.registry[key]; ok && s.Active {
+		m.mu.Unlock()
 		return s, nil
 	}
+	m.mu.Unlock()
 
-	// 2. 建立新连接 (绑定到 Root Context)
+	// 1. 设置配置
 	opts := &corev1.PodLogOptions{
 		Container:  container,
 		Follow:     cfg.Follow,
@@ -64,10 +66,26 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 		opts.TailLines = &cfg.Tail
 	}
 
-	// 这里的 ctx 必须是派生自 root context，以便一键关停
+	// 2. 建立新连接 (配合退避算法)
 	streamCtx, cancel := context.WithCancel(m.ctx)
-	req := m.clientset.CoreV1().Pods(ns).GetLogs(pod, opts)
-	rc, err := req.Stream(streamCtx)
+
+	var rc io.ReadCloser
+	var err error
+	for i := 0; i < 3; i++ {
+		req := m.clientset.CoreV1().Pods(ns).GetLogs(pod, opts)
+		rc, err = req.Stream(streamCtx)
+		if err == nil {
+			break
+		}
+		// 指数退避
+		select {
+		case <-streamCtx.Done():
+			cancel()
+			return nil, streamCtx.Err()
+		case <-time.After(time.Duration(100*(1<<i)) * time.Millisecond):
+		}
+	}
+
 	if err != nil {
 		cancel()
 		return nil, err
@@ -78,13 +96,16 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 		PodName:   pod,
 		Container: container,
 		Scanner:   bufio.NewScanner(rc),
+		Reader:    rc,
 		Cancel:    cancel,
 		Active:    true,
 	}
 
+	m.mu.Lock()
 	m.registry[key] = s
+	m.mu.Unlock()
 
-	// 如果连接断开，自动更新状态
+	// 连接监控
 	go func() {
 		<-streamCtx.Done()
 		m.mu.Lock()
@@ -96,13 +117,14 @@ func (m *StreamManager) GetOrCreate(ns, pod, container string, cfg *config.Confi
 	return s, nil
 }
 
-// CloseAll 关闭所有由管家持有的流 (由 Engine 调用)
+// CloseAll 关闭所有由管家持有的流
 func (m *StreamManager) CloseAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.registry {
 		if s.Cancel != nil {
 			s.Cancel()
+			s.Active = false
 		}
 	}
 }
